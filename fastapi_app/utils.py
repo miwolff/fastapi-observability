@@ -68,17 +68,19 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
             method=method, path=path, app_name=self.app_name).inc()
         REQUESTS.labels(method=method, path=path, app_name=self.app_name).inc()
         before_time = time.perf_counter()
+        status_code = HTTP_500_INTERNAL_SERVER_ERROR
         try:
             response = await call_next(request)
-        except BaseException as e:
+        except Exception as error:
             status_code = HTTP_500_INTERNAL_SERVER_ERROR
             EXCEPTIONS.labels(method=method, path=path, exception_type=type(
-                e).__name__, app_name=self.app_name).inc()
-            raise e from None
+                error).__name__, app_name=self.app_name).inc()
+            raise
         else:
             status_code = response.status_code
+        finally:
             after_time = time.perf_counter()
-            # retrieve trace id for exemplar
+            # Retrieve trace ID for the latency exemplar.
             span = trace.get_current_span()
             trace_id = trace.format_trace_id(
                 span.get_span_context().trace_id)
@@ -86,7 +88,6 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
             REQUESTS_PROCESSING_TIME.labels(method=method, path=path, app_name=self.app_name).observe(
                 after_time - before_time, exemplar={'TraceID': trace_id}
             )
-        finally:
             RESPONSES.labels(method=method, path=path,
                              status_code=status_code, app_name=self.app_name).inc()
             REQUESTS_IN_PROGRESS.labels(
@@ -108,7 +109,8 @@ def metrics(request: Request) -> Response:
     return Response(generate_latest(REGISTRY), headers={"Content-Type": CONTENT_TYPE_LATEST})
 
 
-def setting_otlp(app: ASGIApp, app_name: str, endpoint: str, log_correlation: bool = True) -> None:
+def setting_otlp(app: ASGIApp, app_name: str, endpoint: str, log_correlation: bool = True,
+                 insecure: bool = False) -> None:
     # Setting OpenTelemetry
     # set the service name to show in traces
     resource = Resource.create(attributes={
@@ -120,7 +122,7 @@ def setting_otlp(app: ASGIApp, app_name: str, endpoint: str, log_correlation: bo
     trace.set_tracer_provider(tracer)
 
     tracer.add_span_processor(BatchSpanProcessor(
-        OTLPSpanExporter(endpoint=endpoint, insecure=True)))
+        OTLPSpanExporter(endpoint=endpoint, insecure=insecure)))
 
     if log_correlation:
         LoggingInstrumentor().instrument(set_logging_format=True)
