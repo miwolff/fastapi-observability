@@ -35,54 +35,77 @@ Observe the FastAPI application with three pillars of observability on [Grafana]
 
 ## Quick Start
 
-1. Install [Loki Docker Driver](https://grafana.com/docs/loki/latest/send-data/docker-driver/)
+1. Create the local Grafana credential file
 
-   ```bash
-   # For ARM64
-   docker plugin install grafana/loki-docker-driver:3.3.2-arm64 --alias loki --grant-all-permissions
-   # For AMD64
-   docker plugin install grafana/loki-docker-driver:3.3.2-amd64 --alias loki --grant-all-permissions
-   ```
+    ```bash
+    printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$(openssl rand -base64 32)" > .env
+    ```
 
-2. Start all services with docker-compose
+    This stack binds its published ports to `127.0.0.1`; it is intended for local development. Use a TLS-terminating, authenticated reverse proxy rather than exposing the services directly on a shared network.
 
-   ```bash
-   docker-compose up -d
-   ```
+2. Install [Loki Docker Driver](https://grafana.com/docs/loki/latest/send-data/docker-driver/)
 
-   If got the error message `Error response from daemon: error looking up logging plugin loki: plugin loki found but disabled`, please run the following command to enable the plugin:
+    ```bash
+    # Linux or macOS on ARM64 (including Apple Silicon)
+    docker plugin install grafana/loki-docker-driver:3.7.0-arm64 --alias loki --grant-all-permissions
 
-   ```bash
-   docker plugin enable loki
-   ```
+    # Linux or macOS on AMD64
+    docker plugin install grafana/loki-docker-driver:3.7.0-amd64 --alias loki --grant-all-permissions
+    ```
 
-3. Send requests with [siege](https://linux.die.net/man/1/siege) and curl to the FastAPI app
+    On macOS, install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/) first. Docker Desktop automatically selects `linux/arm64` images on Apple Silicon. On Linux, install Docker Engine with the Compose v2 plugin. No `platform` override is required.
 
-   ```bash
-   bash request-script.sh
-   bash trace.sh
-   ```
+3. Start all services with Docker Compose v2
 
-   Or you can use [Locust](https://locust.io/) to send requests:
+    ```bash
+    docker compose up --build -d
+    ```
 
-   ```bash
-   # install locust first with `pip install locust` if you don't have it
-   locust -f locustfile.py --headless --users 10 --spawn-rate 1 -H http://localhost:8000
-   ```
+    If you get the error message `Error response from daemon: error looking up logging plugin loki: plugin loki found but disabled`, please run the following command to enable the plugin:
 
-   Or you can send requests with [k6](https://k6.io/):
+    ```bash
+    docker plugin enable loki
+    ```
 
-   ```bash
-   k6 run --vus 1 --duration 300s k6-script.js
-   ```
+4. Send requests with [siege](https://linux.die.net/man/1/siege) and curl to the FastAPI app
 
-4. Check predefined dashboard `FastAPI Observability` on Grafana [http://localhost:3000/](http://localhost:3000/) login with `admin:admin`
+    ```bash
+    # macOS
+    brew install siege
 
-   Dashboard screenshot:
+    # Debian/Ubuntu Linux
+    sudo apt-get update && sudo apt-get install -y siege
 
-   ![FastAPI Monitoring Dashboard](./images/dashboard.png)
+    bash request-script.sh
+    bash trace.sh
+    ```
 
-   The dashboard is also available on [Grafana Dashboards](https://grafana.com/grafana/dashboards/16110).
+    Or you can use [Locust](https://locust.io/) to send requests:
+
+    ```bash
+    python3 -m pip install locust
+    python3 -m locust -f locustfile.py --headless --users 10 --spawn-rate 1 -H http://localhost:8000
+    ```
+
+    Or you can send requests with [k6](https://k6.io/):
+
+    ```bash
+    # macOS
+    brew install k6
+
+    # Debian/Ubuntu Linux
+    sudo snap install k6
+
+    k6 run --vus 1 --duration 300s k6-script.js
+    ```
+
+5. Check predefined dashboard `FastAPI Observability` on Grafana [http://localhost:3000/](http://localhost:3000/) and log in as `admin` with the password from `.env`.
+
+    Dashboard screenshot:
+
+    ![FastAPI Monitoring Dashboard](./images/dashboard.png)
+
+    The dashboard is also available on [Grafana Dashboards](https://grafana.com/grafana/dashboards/16110).
 
 ## Explore with Grafana
 
@@ -127,7 +150,8 @@ We use [OpenTelemetry Logging Instrumentation](https://opentelemetry-python-cont
 ```py
 # fastapi_app/utils.py
 
-def setting_otlp(app: ASGIApp, app_name: str, endpoint: str, log_correlation: bool = True) -> None:
+def setting_otlp(app: ASGIApp, app_name: str, endpoint: str, log_correlation: bool = True,
+                 insecure: bool = False) -> None:
     # Setting OpenTelemetry
     # set the service name to show in traces
     resource = Resource.create(attributes={
@@ -139,7 +163,7 @@ def setting_otlp(app: ASGIApp, app_name: str, endpoint: str, log_correlation: bo
     trace.set_tracer_provider(tracer)
 
     tracer.add_span_processor(BatchSpanProcessor(
-        OTLPSpanExporter(endpoint=endpoint)))
+      OTLPSpanExporter(endpoint=endpoint, insecure=insecure)))
 
     if log_correlation:
         LoggingInstrumentor().instrument(set_logging_format=True)
