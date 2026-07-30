@@ -19,7 +19,7 @@ class QuickstartUser(HttpUser):
 
     @task(3)
     def random_sleep(self):
-        self.client.get("/random_sleep", name="/random_sleep")    
+        self.client.get("/random_sleep", name="/random_sleep")
 
     @task(10)
     def random_status(self):
@@ -30,5 +30,5 @@ class QuickstartUser(HttpUser):
         self.client.get("/chain", name="/chain")
 
     @task()
-    def random_sleep(self):
-        self.client.get("/error_test", name="/error_test") 
+    def error_test(self):
+        self.client.get("/error_test", name="/error_test")
