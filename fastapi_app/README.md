@@ -8,7 +8,12 @@ This a demo application built with FastAPI to showcase observability features in
 
 ## Development
 
+The project requires Python 3.12 or newer. `uv` installs a managed interpreter when needed and uses `uv.lock` to reproduce the resolved dependency set.
+
 ```bash
-uv sync
-uv run main.py
+uv python install 3.12
+uv sync --locked
+uv run --locked python main.py
 ```
+
+The application listens on `http://localhost:8000`. For the complete Grafana, Prometheus, Loki, and Tempo stack, start Docker Compose from the repository root as described in the [root README](../readme.md).

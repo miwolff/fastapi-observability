@@ -1,30 +1,50 @@
+import asyncio
 import logging
 import os
 import random
-import time
+import re
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from opentelemetry.propagate import inject
 from utils import PrometheusMiddleware, metrics, setting_otlp
 
 APP_NAME = os.environ.get("APP_NAME", "app")
-EXPOSE_PORT = os.environ.get("EXPOSE_PORT", 8000)
+EXPOSE_PORT = int(os.environ.get("EXPOSE_PORT", "8000"))
 OTLP_GRPC_ENDPOINT = os.environ.get("OTLP_GRPC_ENDPOINT", "tempo:4317")
+OTLP_INSECURE = os.environ.get("OTLP_INSECURE", "false").lower() == "true"
 
 TARGET_ONE_HOST = os.environ.get("TARGET_ONE_HOST", "app-b")
 TARGET_TWO_HOST = os.environ.get("TARGET_TWO_HOST", "app-c")
+HOSTNAME_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 
-app = FastAPI()
+for target_name, target_host in (
+    ("TARGET_ONE_HOST", TARGET_ONE_HOST),
+    ("TARGET_TWO_HOST", TARGET_TWO_HOST),
+):
+    if not HOSTNAME_PATTERN.fullmatch(target_host):
+        raise ValueError(
+            f"{target_name} must be a hostname; received {target_host!r}"
+        )
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    application.state.http_client = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+    yield
+    await application.state.http_client.aclose()
+
+app = FastAPI(lifespan=lifespan)
 
 # Setting metrics middleware
 app.add_middleware(PrometheusMiddleware, app_name=APP_NAME)
 app.add_route("/metrics", metrics)
 
 # Setting OpenTelemetry exporter
-setting_otlp(app, APP_NAME, OTLP_GRPC_ENDPOINT)
+setting_otlp(app, APP_NAME, OTLP_GRPC_ENDPOINT, insecure=OTLP_INSECURE)
 
 
 class EndpointFilter(logging.Filter):
@@ -39,72 +59,82 @@ logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 @app.get("/")
 async def read_root():
-    logging.error("Hello World")
+    logging.info("Hello World")
     return {"Hello": "World"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.get("/items/{item_id}")
 async def read_item(item_id: int, q: Optional[str] = None):
-    logging.error("items")
+    logging.info("items")
     return {"item_id": item_id, "q": q}
 
 
 @app.get("/io_task")
 async def io_task():
-    time.sleep(1)
-    logging.error("io task")
+    await asyncio.sleep(1)
+    logging.info("io task")
     return "IO bound task finish!"
 
 
 @app.get("/cpu_task")
 async def cpu_task():
-    for i in range(1000):
-        _ = i * i * i
-    logging.error("cpu task")
+    await asyncio.to_thread(sum, (number * number * number for number in range(1000)))
+    logging.info("cpu task")
     return "CPU bound task finish!"
 
 
 @app.get("/random_status")
 async def random_status(response: Response):
-    response.status_code = random.choice([200, 200, 300, 400, 500])
-    logging.error("random status")
+    response.status_code = random.choice([200, 200, 202, 400, 500])
+    logging.info("random status")
     return {"path": "/random_status"}
 
 
 @app.get("/random_sleep")
 async def random_sleep(response: Response):
-    time.sleep(random.randint(0, 5))
-    logging.error("random sleep")
+    await asyncio.sleep(random.randint(0, 5))
+    logging.info("random sleep")
     return {"path": "/random_sleep"}
 
 
 @app.get("/error_test")
 async def error_test(response: Response):
-    logging.error("got error!!!!")
+    logging.error("Intentional error test")
     raise ValueError("value error")
 
 
 @app.get("/chain")
-async def chain(response: Response):
+async def chain(request: Request):
     headers = {}
     inject(headers)  # inject trace info to header
-    logging.critical(headers)
+    logging.debug("Injected trace context into downstream requests")
 
-    async with httpx.AsyncClient() as client:
-        await client.get(
+    try:
+        responses = await asyncio.gather(
+            request.app.state.http_client.get(
             "http://localhost:8000/",
             headers=headers,
-        )
-    async with httpx.AsyncClient() as client:
-        await client.get(
+            ),
+            request.app.state.http_client.get(
             f"http://{TARGET_ONE_HOST}:8000/io_task",
             headers=headers,
-        )
-    async with httpx.AsyncClient() as client:
-        await client.get(
+            ),
+            request.app.state.http_client.get(
             f"http://{TARGET_TWO_HOST}:8000/cpu_task",
             headers=headers,
+            ),
         )
+        for downstream_response in responses:
+            downstream_response.raise_for_status()
+    except httpx.HTTPError as error:
+        logging.error("Chain dependency failed: %s", error)
+        raise HTTPException(status_code=502, detail="Chain dependency failed") from error
+
     logging.info("Chain Finished")
     return {"path": "/chain"}
 
