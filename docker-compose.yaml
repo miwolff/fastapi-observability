@@ -1,88 +1,183 @@
+name: fastapi-obs
+
 x-logging: &default-logging
   driver: loki
   options:
+    # Required for reliable teardown: Tempo can otherwise leave Docker waiting
+    # on the Loki driver even when using the current plugin release.
+    mode: non-blocking
+    keep-file: "true"
+    loki-retries: "2"
+    loki-max-backoff: 800ms
+    loki-timeout: 1s
     loki-url: 'http://localhost:3100/api/prom/push'
     loki-pipeline-stages: |
+      # A timestamp starts a new entry; following lines stay with it for stack traces.
       - multiline:
           firstline: '^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2}'
+        # Flush an incomplete entry after three seconds of inactivity.
           max_wait_time: 3s
+      # Capture the timestamp and entire entry; (?s:.*) includes embedded newlines.
+      # Compose passes $$ to the driver as a literal regex end-of-entry anchor ($).
       - regex:
           expression: '^(?P<time>\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2},\d{3}) (?P<message>(?s:.*))$$'
+
+x-service-defaults: &service-defaults
+  # Shared lifecycle setting; <<: *service-defaults merges this into each service.
+  restart: unless-stopped
+
+x-app-environment: &app-environment
+  # These values come from .env when set; otherwise they match main.py defaults.
+  OTLP_GRPC_ENDPOINT: ${OTLP_GRPC_ENDPOINT:-tempo:4317}
+  OTLP_INSECURE: ${OTLP_INSECURE:-true}
+  TARGET_ONE_HOST: ${TARGET_ONE_HOST:-app-b}
+  TARGET_TWO_HOST: ${TARGET_TWO_HOST:-app-c}
 
 services:
   loki:
     image: grafana/loki:3.5.0
     command: -config.file=/etc/loki/local-config.yaml
     ports:
-      - "3100:3100"
+      # Publish only to this machine; other Compose services use http://loki:3100.
+      - "127.0.0.1:3100:3100"
+    <<: *service-defaults
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app-a:
-    # build: ./fastapi_app/
-    image: ghcr.io/blueswen/fastapi-observability/app:latest
+    build: ./fastapi_app/
+    image: fastapi-obs/app:0.1.0
     ports:
-      - "8000:8000"
+      # The public load-test entry point; app-b and app-c stay on the internal network.
+      - "127.0.0.1:8000:8000"
     depends_on:
-      - loki
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
     environment:
+      <<: *app-environment
+      # Keep service identity fixed so dashboard labels remain app-a/app-b/app-c.
       APP_NAME: "app-a"
     logging: *default-logging
+    <<: *service-defaults
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck: &app-healthcheck
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app-b:
-    # build: ./fastapi_app/
-    image: ghcr.io/blueswen/fastapi-observability/app:latest
-    ports:
-      - "8001:8000"
+    build: ./fastapi_app/
+    image: fastapi-obs/app:0.1.0
+    # No host port: reachable only as http://app-b:8000 from the Compose network.
     depends_on:
-      - loki
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
     environment:
+      <<: *app-environment
       APP_NAME: "app-b"
     logging: *default-logging
+    <<: *service-defaults
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck: *app-healthcheck
 
   app-c:
-    # build: ./fastapi_app/
-    image: ghcr.io/blueswen/fastapi-observability/app:latest
-    ports:
-      - "8002:8000"
+    build: ./fastapi_app/
+    image: fastapi-obs/app:0.1.0
+    # No host port: reachable only as http://app-c:8000 from the Compose network.
     depends_on:
-      - loki
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
     environment:
+      <<: *app-environment
       APP_NAME: "app-c"
     logging: *default-logging
+    <<: *service-defaults
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck: *app-healthcheck
 
   prometheus:
     image: prom/prometheus:v3.3.1
-    ports:
-      - "9090:9090"
+    # No host port: Grafana reaches this service internally at http://prometheus:9090.
     volumes:
       - ./etc/prometheus:/workspace
+      # Local TSDB storage for this demo; use a remote-write backend in production.
+      - prometheus:/prometheus
     command:
       - --config.file=/workspace/prometheus.yml
       - --enable-feature=exemplar-storage
-    depends_on:
-      - loki
     logging: *default-logging
+    <<: *service-defaults
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   tempo:
     image: grafana/tempo:2.7.2
-    command: [ "-config.file=/etc/tempo.yml", "--target=all", "--storage.trace.backend=local", "--storage.trace.local.path=/var/tempo", "--auth.enabled=false" ]
-    ports:
-      - "4317:4317"
-      - "4318:4318"
+    # No host port: applications export traces internally to tempo:4317.
+    command: [ "-config.file=/etc/tempo.yml", "--target=all", "--storage.trace.backend=local", "--storage.trace.local.path=/var/tempo" ]
+    # Bounds shutdown if Tempo does not exit cleanly after the driver is stopped.
+    stop_grace_period: 10s
     volumes:
       - ./etc/tempo/tempo.yml:/etc/tempo.yml
-    depends_on:
-      - loki
+      # Local trace storage for this demo; use S3/GCS/Azure Blob Storage in production.
+      - tempo:/var/tempo
     logging: *default-logging
+    <<: *service-defaults
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   grafana:
     image: grafana/grafana:12.0.0
     ports:
-      - "3000:3000"
+      # Publish the dashboard only to this machine; open http://localhost:3000.
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./etc/grafana/:/etc/grafana/provisioning/datasources
       - ./etc/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
       - ./etc/dashboards:/etc/grafana/dashboards
+      # Local Grafana metadata; production deployments can configure PostgreSQL or MySQL.
+      - grafana:/var/lib/grafana
     depends_on:
       - loki
       - prometheus
+      - tempo
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
     logging: *default-logging
+    <<: *service-defaults
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  grafana:
+  prometheus:
+  tempo:
