@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "grafana": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.vscode/run-grafana-mcp.sh"
+    }
+  }
+}
