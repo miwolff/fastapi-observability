@@ -10,7 +10,18 @@ dependencies = [
     "opentelemetry-distro>=0.54b0",
     "opentelemetry-exporter-otlp>=1.33.0",
     "opentelemetry-instrumentation-fastapi>=0.54b0",
+    "opentelemetry-instrumentation-httpx>=0.65b0",
     "opentelemetry-instrumentation-logging>=0.54b0",
     "prometheus-client>=0.21.1",
     "uvicorn>=0.34.2",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.uv]
+# Supply-chain policy: only resolve package versions published at least one week ago,
+# giving the ecosystem time to detect and yank compromised or broken releases.
+exclude-newer = "1 week"

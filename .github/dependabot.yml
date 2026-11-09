@@ -1,0 +1,50 @@
+# Dependency policy: only adopt versions that have been public for at least one week.
+# `cooldown` makes Dependabot wait 7 days after a release before proposing it, matching
+# `exclude-newer = "1 week"` in each pyproject.toml. Images are pinned by digest and
+# actions by commit SHA, so a re-pushed tag cannot introduce a newer artifact.
+version: 2
+
+updates:
+  - package-ecosystem: uv
+    directories:
+      - /fastapi_app
+      - /pipelines
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      opentelemetry:
+        patterns: ["opentelemetry-*"]
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories:
+      - /fastapi_app
+      - /pipelines
+      - /etc/loki
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      grafana-stack:
+        patterns: ["grafana/*", "prom/*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

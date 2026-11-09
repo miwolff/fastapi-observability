@@ -21,8 +21,10 @@ metrics_generator:
     remote_write:
       - url: http://prometheus:9090/api/v1/write
 
-overrides:
-  defaults:
-    metrics_generator:
-      processors:
-        - local-blocks
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
