@@ -1,0 +1,41 @@
+# Alerts for the scheduled pipelines, based on span metrics derived by Tempo.
+# Jobs run every five minutes, so a 15-minute window expects three runs.
+groups:
+  - name: scheduled-pipelines
+    rules:
+      - alert: PipelineRunFailed
+        # ERROR = the run aborted or at least one record failed.
+        expr: |
+          sum by (service) (
+            increase(traces_spanmetrics_calls_total{span_name="pipeline.run", service=~"pipelines-.*", status_code="STATUS_CODE_ERROR"}[10m])
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} had a failed run in the last 10 minutes"
+          description: 'TraceQL: { resource.service.name = "{{ $labels.service }}" && name = "pipeline.run" && status = error }'
+
+      - alert: PipelineNoSuccessfulRun
+        # The job is still being scheduled but nothing has succeeded.
+        expr: |
+          sum by (service) (
+            increase(traces_spanmetrics_calls_total{span_name="pipeline.run", service=~"pipelines-.*", status_code!="STATUS_CODE_ERROR"}[15m])
+          ) < 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} has not completed a successful run in 15 minutes"
+
+      - alert: PipelineRunsMissing
+        # Tempo drops idle span-metric series after 15 minutes, so a job that stops
+        # running entirely (scheduler down, image missing) shows up as absence.
+        expr: |
+          absent_over_time(traces_spanmetrics_calls_total{span_name="pipeline.run", service="pipelines-enrich"}[20m])
+          or
+          absent_over_time(traces_spanmetrics_calls_total{span_name="pipeline.run", service="pipelines-score"}[20m])
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} has not run for at least 20 minutes"

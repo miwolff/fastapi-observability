@@ -1,0 +1,4 @@
+record_id,customer_name,region,amount
+1,Ada Lovelace,west,125.50
+2,Grace Hopper,east,240.00
+3,Linus Torvalds,north,89.99

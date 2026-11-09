@@ -1,5 +1,9 @@
 .DS_Store
 
+# Runtime CSV artifacts created by scheduled pipeline jobs.
+data/pipeline-output/*
+!data/pipeline-output/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

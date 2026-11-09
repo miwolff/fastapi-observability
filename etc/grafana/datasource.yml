@@ -44,14 +44,28 @@ datasources:
     jsonData:
       nodeGraph:
         enabled: true
+      # Service map built from Tempo's service-graph metrics in Prometheus.
+      serviceMap:
+        datasourceUid: prometheus
       tracesToLogsV2:
         customQuery: false
         datasourceUid: loki
         filterBySpanID: false
         filterByTraceID: true
+        # Docker-driver and OTLP log streams both carry service_name.
         tags:
           - key: service.name
-            value: compose_service
+            value: service_name
+      tracesToMetrics:
+        datasourceUid: prometheus
+        tags:
+          - key: service.name
+            value: service
+        queries:
+          - name: Request rate
+            query: sum by (span_name) (rate(traces_spanmetrics_calls_total{$$__tags}[5m]))
+          - name: Error rate
+            query: sum by (span_name) (rate(traces_spanmetrics_calls_total{$$__tags, status_code="STATUS_CODE_ERROR"}[5m]))
     readOnly: false
     editable: true
   - uid: loki
