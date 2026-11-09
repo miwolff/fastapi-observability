@@ -4,15 +4,18 @@ import os
 import random
 import re
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from opentelemetry.propagate import inject
-from utils import PrometheusMiddleware, metrics, setting_otlp
+from utils import (LOG_FORMAT, PrometheusMiddleware, metrics, project_version,
+                   setting_otlp)
 
 APP_NAME = os.environ.get("APP_NAME", "app")
+APP_VERSION = project_version(Path(__file__).with_name("pyproject.toml"))
 EXPOSE_PORT = int(os.environ.get("EXPOSE_PORT", "8000"))
 OTLP_GRPC_ENDPOINT = os.environ.get("OTLP_GRPC_ENDPOINT", "tempo:4317")
 OTLP_INSECURE = os.environ.get("OTLP_INSECURE", "false").lower() == "true"
@@ -39,12 +42,19 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+
+@app.middleware("http")
+async def add_app_version_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-App-Version"] = APP_VERSION
+    return response
+
 # Setting metrics middleware
 app.add_middleware(PrometheusMiddleware, app_name=APP_NAME)
 app.add_route("/metrics", metrics)
 
 # Setting OpenTelemetry exporter
-setting_otlp(app, APP_NAME, OTLP_GRPC_ENDPOINT, insecure=OTLP_INSECURE)
+setting_otlp(app, APP_NAME, APP_VERSION, OTLP_GRPC_ENDPOINT, insecure=OTLP_INSECURE)
 
 
 class EndpointFilter(logging.Filter):
@@ -142,7 +152,5 @@ async def chain(request: Request):
 if __name__ == "__main__":
     # update uvicorn access logger format
     log_config = uvicorn.config.LOGGING_CONFIG
-    log_config["formatters"]["access"][
-        "fmt"
-    ] = "%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s resource.service.name=%(otelServiceName)s] - %(message)s"
+    log_config["formatters"]["access"]["fmt"] = LOG_FORMAT
     uvicorn.run(app, host="0.0.0.0", port=EXPOSE_PORT, log_config=log_config)

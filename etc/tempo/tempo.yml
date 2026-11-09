@@ -20,6 +20,8 @@ metrics_generator:
     path: /var/tempo/generator/wal
     remote_write:
       - url: http://prometheus:9090/api/v1/write
+        # Exemplars let Grafana jump from a span-metrics latency point to its trace.
+        send_exemplars: true
 
 storage:
   trace:
@@ -28,3 +30,13 @@ storage:
       path: /var/tempo/wal
     local:
       path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+        # RED metrics (traces_spanmetrics_*) for every service, including the
+        # batch pipelines, without high-cardinality run/record labels.
+        - span-metrics
+        # Feeds Grafana's service map (traces_service_graph_*).
+        - service-graphs

@@ -1,0 +1,65 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  pipelines:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipelines
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Without a version, setup-uv installs the newest uv, bypassing the one-week rule.
+          version: "0.13.6"
+          enable-cache: true
+
+      - name: Run pipeline tests
+        # --locked fails if uv.lock no longer matches pyproject.toml (including exclude-newer).
+        run: uv run --locked pytest -q
+
+  fastapi-app:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fastapi_app
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Without a version, setup-uv installs the newest uv, bypassing the one-week rule.
+          version: "0.13.6"
+          enable-cache: true
+
+      - name: Run application tests
+        run: uv run --locked pytest -q
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate Compose file
+        env:
+          # Compose requires the variable; any value is enough to validate.
+          GRAFANA_ADMIN_PASSWORD: ci-only
+        run: docker compose config --quiet
+
+      - name: Build pipeline image
+        run: docker build ./pipelines

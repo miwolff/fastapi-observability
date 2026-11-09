@@ -1,0 +1,4 @@
+record_id,account_name,segment,risk_value
+1,Orion Manufacturing,enterprise,72
+2,Maple Retail,small-business,18
+3,Delta Logistics,mid-market,46

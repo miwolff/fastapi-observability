@@ -11,6 +11,12 @@ x-logging: &default-logging
     loki-max-backoff: 800ms
     loki-timeout: 1s
     loki-url: 'http://localhost:3100/api/prom/push'
+    # Loki would otherwise derive service_name from the container name. Matching the
+    # OTel service.name lets Tempo link every service's spans to its logs, including
+    # pipeline jobs that ship logs to Loki over OTLP.
+    loki-relabel-config: |
+      - source_labels: [compose_service]
+        target_label: service_name
     loki-pipeline-stages: |
       # A timestamp starts a new entry; following lines stay with it for stack traces.
       - multiline:
@@ -33,6 +39,45 @@ x-app-environment: &app-environment
   TARGET_ONE_HOST: ${TARGET_ONE_HOST:-app-b}
   TARGET_TWO_HOST: ${TARGET_TWO_HOST:-app-c}
 
+# app-a, app-b and app-c run the same image; only APP_NAME (and app-a's port) differ.
+x-app: &app
+  build: ./fastapi_app/
+  image: fastapi-obs/app:0.1.0
+  depends_on:
+    loki:
+      condition: service_healthy
+    tempo:
+      condition: service_healthy
+  logging: *default-logging
+  restart: unless-stopped
+  mem_limit: 256m
+  cpus: 0.5
+  healthcheck:
+    test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health')"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+
+x-pipeline-environment: &pipeline-environment
+  OTLP_GRPC_ENDPOINT: ${OTLP_GRPC_ENDPOINT:-tempo:4317}
+  OTLP_INSECURE: ${OTLP_INSECURE:-true}
+  FASTAPI_TARGET: ${FASTAPI_TARGET:-latest}
+  # Ofelia job containers bypass the Loki logging driver, so jobs send logs over OTLP.
+  OTLP_LOGS_ENDPOINT: ${OTLP_LOGS_ENDPOINT:-http://loki:3100/otlp/v1/logs}
+
+x-pipeline-volumes: &pipeline-volumes
+  - ./pipelines/data/input:/app/data/input:ro
+  - ./etc/pipelines:/app/config:ro
+  - ./data/pipeline-output:/data/output
+
+# Ofelia receives labels only as strings, so its environment and volume lists
+# must be JSON; Compose itself requires the structured definitions above.
+# Scheduled jobs write only warnings to stderr; Ofelia copies job stderr into its own
+# log, so full INFO logs would otherwise reach Loki twice (once as "scheduler").
+x-pipeline-job-environment: &pipeline-job-environment '["FASTAPI_TARGET=${FASTAPI_TARGET:-latest}", "OTLP_GRPC_ENDPOINT=${OTLP_GRPC_ENDPOINT:-tempo:4317}", "OTLP_INSECURE=${OTLP_INSECURE:-true}", "OTLP_LOGS_ENDPOINT=${OTLP_LOGS_ENDPOINT:-http://loki:3100/otlp/v1/logs}", "PIPELINE_CONSOLE_LOG_LEVEL=WARNING"]'
+x-pipeline-job-volumes: &pipeline-job-volumes '["${PWD}/pipelines/data/input:/app/data/input:ro", "${PWD}/etc/pipelines:/app/config:ro", "${PWD}/data/pipeline-output:/data/output:rw"]'
+x-pipeline-job-user: &pipeline-job-user "${PIPELINE_UID:-10001}:${PIPELINE_GID:-10001}"
+
 services:
   loki:
     build: ./etc/loki/
@@ -52,65 +97,80 @@ services:
       retries: 5
 
   app-a:
-    build: ./fastapi_app/
-    image: fastapi-obs/app:0.1.0
+    <<: *app
     ports:
       # The public load-test entry point; app-b and app-c stay on the internal network.
       - "127.0.0.1:8000:8000"
-    depends_on:
-      loki:
-        condition: service_healthy
-      tempo:
-        condition: service_healthy
     environment:
       <<: *app-environment
       # Keep service identity fixed so dashboard labels remain app-a/app-b/app-c.
       APP_NAME: "app-a"
+
+  pipelines:
+    build: ./pipelines/
+    image: fastapi-obs/pipelines:0.1.0
+    profiles: ["manual"]
+    user: *pipeline-job-user
+    environment: *pipeline-environment
+    volumes: *pipeline-volumes
+    # No Loki driver: the job exports logs over OTLP; the driver would duplicate them.
+    # One-shot command, so it must never be restarted.
+    restart: "no"
+    mem_limit: 128m
+    cpus: 0.25
+
+  scheduler:
+    image: mcuadros/ofelia:0.3.22@sha256:efcbe2c5cf658a25de6443c1462d653f9cc03791d642e01fc6c638a00f97e492
+    command: daemon --docker -f label=com.docker.compose.project=fastapi-obs
+    depends_on:
+      app-a:
+        condition: service_healthy
+      app-b:
+        condition: service_healthy
+      app-c:
+        condition: service_healthy
+    volumes:
+      # Ofelia needs Docker API access to create one-shot job containers.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      ofelia.enabled: "true"
+      # Ofelia 0.3.x treats the first cron field as seconds.
+      ofelia.job-run.enrich.schedule: "0 */5 * * * *"
+      ofelia.job-run.enrich.no-overlap: "true"
+      ofelia.job-run.enrich.image: "fastapi-obs/pipelines:0.1.0"
+      ofelia.job-run.enrich.network: "fastapi-obs_default"
+      ofelia.job-run.enrich.delete: "true"
+      ofelia.job-run.enrich.user: *pipeline-job-user
+      ofelia.job-run.enrich.command: "enrich --input /app/data/input/enrich.csv --output-dir /data/output"
+      ofelia.job-run.enrich.environment: *pipeline-job-environment
+      ofelia.job-run.enrich.volume: *pipeline-job-volumes
+      ofelia.job-run.score.schedule: "0 */5 * * * *"
+      ofelia.job-run.score.no-overlap: "true"
+      ofelia.job-run.score.image: "fastapi-obs/pipelines:0.1.0"
+      ofelia.job-run.score.network: "fastapi-obs_default"
+      ofelia.job-run.score.delete: "true"
+      ofelia.job-run.score.user: *pipeline-job-user
+      ofelia.job-run.score.command: "score --input /app/data/input/score.csv --output-dir /data/output"
+      ofelia.job-run.score.environment: *pipeline-job-environment
+      ofelia.job-run.score.volume: *pipeline-job-volumes
     logging: *default-logging
     <<: *service-defaults
-    mem_limit: 256m
-    cpus: 0.5
-    healthcheck: &app-healthcheck
-      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    mem_limit: 128m
+    cpus: 0.25
 
   app-b:
-    build: ./fastapi_app/
-    image: fastapi-obs/app:0.1.0
+    <<: *app
     # No host port: reachable only as http://app-b:8000 from the Compose network.
-    depends_on:
-      loki:
-        condition: service_healthy
-      tempo:
-        condition: service_healthy
     environment:
       <<: *app-environment
       APP_NAME: "app-b"
-    logging: *default-logging
-    <<: *service-defaults
-    mem_limit: 256m
-    cpus: 0.5
-    healthcheck: *app-healthcheck
 
   app-c:
-    build: ./fastapi_app/
-    image: fastapi-obs/app:0.1.0
+    <<: *app
     # No host port: reachable only as http://app-c:8000 from the Compose network.
-    depends_on:
-      loki:
-        condition: service_healthy
-      tempo:
-        condition: service_healthy
     environment:
       <<: *app-environment
       APP_NAME: "app-c"
-    logging: *default-logging
-    <<: *service-defaults
-    mem_limit: 256m
-    cpus: 0.5
-    healthcheck: *app-healthcheck
 
   prometheus:
     image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
@@ -122,6 +182,8 @@ services:
     command:
       - --config.file=/workspace/prometheus.yml
       - --enable-feature=exemplar-storage
+      # Receives span-metrics and service-graph series from Tempo's metrics generator.
+      - --web.enable-remote-write-receiver
     logging: *default-logging
     <<: *service-defaults
     mem_limit: 1g

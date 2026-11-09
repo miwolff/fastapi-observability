@@ -1,0 +1,6 @@
+[targets.app-v1]
+url = "http://app-a:8000"
+expected_version = "0.1.0"
+
+[aliases]
+latest = "app-v1"
