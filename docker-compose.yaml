@@ -35,7 +35,8 @@ x-app-environment: &app-environment
 
 services:
   loki:
-    image: grafana/loki:3.5.0
+    build: ./etc/loki/
+    image: fastapi-obs/loki:3.7.9
     command: -config.file=/etc/loki/local-config.yaml
     ports:
       # Publish only to this machine; other Compose services use http://loki:3100.
@@ -44,7 +45,8 @@ services:
     mem_limit: 512m
     cpus: 1.0
     healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3100/ready"]
+      # Distroless image: busybox is added by etc/loki/Dockerfile.
+      test: ["CMD", "/usr/local/bin/busybox", "wget", "--quiet", "--spider", "http://localhost:3100/ready"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -111,7 +113,7 @@ services:
     healthcheck: *app-healthcheck
 
   prometheus:
-    image: prom/prometheus:v3.3.1
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     # No host port: Grafana reaches this service internally at http://prometheus:9090.
     volumes:
       - ./etc/prometheus:/workspace
@@ -131,9 +133,9 @@ services:
       retries: 5
 
   tempo:
-    image: grafana/tempo:2.7.2
+    image: grafana/tempo:3.1.1@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
     # No host port: applications export traces internally to tempo:4317.
-    command: [ "-config.file=/etc/tempo.yml", "--target=all", "--storage.trace.backend=local", "--storage.trace.local.path=/var/tempo" ]
+    command: [ "-config.file=/etc/tempo.yml", "--target=all" ]
     # Bounds shutdown if Tempo does not exit cleanly after the driver is stopped.
     stop_grace_period: 10s
     volumes:
@@ -145,13 +147,14 @@ services:
     mem_limit: 1g
     cpus: 1.0
     healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3200/ready"]
+      # Distroless image: Tempo 3 checks its own /ready endpoint.
+      test: ["CMD", "/tempo", "-health"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   grafana:
-    image: grafana/grafana:12.0.0
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     ports:
       # Publish the dashboard only to this machine; open http://localhost:3000.
       - "127.0.0.1:3000:3000"
